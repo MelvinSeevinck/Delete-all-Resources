@@ -1,150 +1,177 @@
-Script Parameters Guide
+## **Parameters**
 
-This document explains which parameters are required and optional to successfully run the Azure Resource Cleanup script in Azure Cloud Shell.
+Dit script vereist **één verplichte parameter** en meerdere **optionele parameters**.  
+Zonder de juiste parameters zal het script **geen destructieve acties uitvoeren**.
 
-The script is designed to be safe by default and will not perform destructive actions unless the correct parameters are explicitly provided.
+De parameters bepalen:
+- **Binnen welke Azure subscription** het script wordt uitgevoerd
+- **Hoe het script zich gedraagt** (audit of verwijderen)
+- **Welke scope** wordt gebruikt om resources te selecteren en te verwijderen
 
-Required Parameter
--SubscriptionId (Required)
+---
+
+### **SubscriptionId** (verplicht)
+
+```powershell
 -SubscriptionId "<subscription-id>"
+Geeft aan binnen welke Azure subscription het script wordt uitgevoerd.
 
+Altijd verplicht
 
-Specifies the Azure subscription in which the script will operate.
+Het script werkt per subscription
 
-All Azure resources exist within a subscription
+Zonder deze parameter stopt het script direct
 
-The script cannot run without this parameter
+Deze parameter is noodzakelijk omdat alle Azure resources altijd aan een subscription zijn gekoppeld.
 
-The script always works on one subscription at a time
-
-If this parameter is missing, the script will stop immediately.
-
-Mode Parameter
--Mode (Optional)
--Mode Audit   # Default
+Mode
+powershell
+Code kopiëren
+-Mode Audit
 -Mode Delete
+Bepaalt het gedrag van het script.
 
+Audit
 
-Defines how the script behaves.
+Standaard modus
 
-Mode	Description
-Audit	No resources are deleted. Inventory and logs are generated only.
-Delete	Resources within the defined scope are deleted without confirmation prompts.
+Er worden geen resources verwijderd
 
-If not specified, the script runs in Audit mode.
+Alleen een inventaris (CSV en JSON) en logging worden aangemaakt
 
-Scope Parameters
+Geschikt om vooraf te controleren wat er geraakt zou worden
 
-(Required when using -Mode Delete)
+Delete
 
-To prevent accidental deletion, a scope must be explicitly defined when running in Delete mode.
+Alle resources binnen de opgegeven scope worden verwijderd
 
-Option 1: Resource Group Scope
+Er worden geen bevestigingsvragen gesteld
+
+Deze modus voert onomkeerbare acties uit
+
+Scope parameters
+Verplicht bij gebruik van Mode Delete.
+
+Om onbedoelde verwijderingen te voorkomen, moet bij Mode Delete altijd een scope worden opgegeven.
+Zonder scope zal het script weigeren om resources te verwijderen.
+
+ResourceGroupName
+powershell
+Code kopiëren
 -ResourceGroupName "rg-customer-prod"
+Verwijdert alle Azure resources binnen de opgegeven resource group.
 
+Beperkt het script tot één resource group
 
-Deletes all Azure resources within the specified resource group.
+Veel gebruikt bij het opruimen of beëindigen van klantomgevingen
 
-Option 2: Tag-Based Scope
+TagName en TagValue
+powershell
+Code kopiëren
 -TagName "DeleteMe"
 -TagValue "True"
+Verwijdert alle resources met de opgegeven tag.
 
+TagValue is optioneel
 
-Deletes all resources that contain the specified tag.
+Als alleen TagName wordt opgegeven, worden alle resources met deze tag verwijderd
 
-Notes:
+Handig om resources vooraf te markeren voor verwijdering
 
--TagValue is optional
-
-If only -TagName is provided, all resources with that tag are included regardless of value
-
-Option 3: Subscription-Wide Scope (Explicit Approval Required)
+AllowSubscriptionWideDelete
+powershell
+Code kopiëren
 -AllowSubscriptionWideDelete
+Maakt het mogelijk om alle Azure resources binnen de gehele subscription te verwijderen.
 
+Standaard geblokkeerd
 
-Allows deletion of all Azure resources within the subscription.
+Moet expliciet worden opgegeven
 
-⚠️ This option is blocked by default and must be explicitly enabled.
+Alleen gebruiken wanneer dit bewust en goedgekeurd is
 
-Optional Behavior Parameters
--MaxDeletePasses
+Deze parameter voorkomt dat per ongeluk een volledige subscription wordt opgeschoond.
+
+Optionele parameters
+De onderstaande parameters zijn niet verplicht, maar beïnvloeden het gedrag van het script.
+
+MaxDeletePasses
+powershell
+Code kopiëren
 -MaxDeletePasses 5
+Bepaalt het aantal verwijderrondes dat het script uitvoert.
 
+Handig bij afhankelijkheden tussen resources
 
-Number of deletion attempts performed by the script.
+Het script probeert meerdere keren om achterblijvende resources te verwijderen
 
-Useful for handling resource dependencies
+Standaardwaarde: 5
 
-Default value: 5
-
--SecondsBetweenPasses
+SecondsBetweenPasses
+powershell
+Code kopiëren
 -SecondsBetweenPasses 15
+Bepaalt de wachttijd in seconden tussen verwijderrondes.
 
+Geeft Azure tijd om afhankelijkheden correct af te handelen
 
-Time in seconds to wait between deletion passes.
+Standaardwaarde: 15 seconden
 
-Default value: 15 seconds
-
+PurgeSoftDeleted
+powershell
+Code kopiëren
 -PurgeSoftDeleted
--PurgeSoftDeleted
-
-
-Attempts to permanently remove soft-deleted resources where supported, such as:
+Probeert soft-deleted resources permanent te verwijderen waar dit wordt ondersteund, zoals:
 
 Azure Key Vaults
 
 Azure Storage Accounts
 
+Deze parameter wordt alleen toegepast na het verwijderen van actieve resources.
+
+IncludeResourceGroupsInDelete
+powershell
+Code kopiëren
 -IncludeResourceGroupsInDelete
--IncludeResourceGroupsInDelete
+Verwijdert ook de resource group zelf nadat alle resources zijn verwijderd.
 
+Alleen van toepassing als ResourceGroupName is opgegeven
 
-Deletes the resource group itself after all contained resources have been removed.
+Zonder deze parameter blijft de resource group bestaan
 
-Only applicable when -ResourceGroupName is specified.
+Overzicht parameters
+Parameter	Verplicht	Omschrijving
+SubscriptionId	Ja	Doel subscription
+Mode	Nee	Audit of Delete
+ResourceGroupName	Nee	Scope op resource group
+TagName	Nee	Scope op tag
+TagValue	Nee	Optionele tagwaarde
+AllowSubscriptionWideDelete	Nee	Subscription-breed verwijderen
+MaxDeletePasses	Nee	Aantal verwijderrondes
+SecondsBetweenPasses	Nee	Wachtijd tussen rondes
+PurgeSoftDeleted	Nee	Opruimen soft-deleted resources
+IncludeResourceGroupsInDelete	Nee	Verwijdert resource group zelf
 
-Parameter Summary Table
-Parameter	Required	Description
-SubscriptionId	Yes	Target Azure subscription
-Mode	No	Audit or Delete
-ResourceGroupName	No	Scope limited to a resource group
-TagName	No	Scope based on resource tag
-TagValue	No	Optional tag value filter
-AllowSubscriptionWideDelete	No	Enables subscription-wide deletion
-MaxDeletePasses	No	Number of deletion retries
-SecondsBetweenPasses	No	Delay between deletion passes
-PurgeSoftDeleted	No	Purges soft-deleted resources
-IncludeResourceGroupsInDelete	No	Deletes the resource group itself
-Valid Usage Examples
-Audit resources in a resource group
-.\cleanup.ps1 `
-  -SubscriptionId "<subscription-id>" `
-  -ResourceGroupName "rg-test"
+Belangrijke opmerkingen
+Het script werkt alleen op Azure resources binnen een subscription
 
-Delete resources in a resource group
-.\cleanup.ps1 `
-  -SubscriptionId "<subscription-id>" `
-  -ResourceGroupName "rg-test" `
-  -Mode Delete
+Entra ID (Azure AD) objecten worden niet verwijderd
 
-Delete resources by tag
-.\cleanup.ps1 `
-  -SubscriptionId "<subscription-id>" `
-  -TagName "DeleteMe" `
-  -Mode Delete
+Verwijderacties zijn onomkeerbaar
 
-Subscription-wide cleanup (explicit approval)
-.\cleanup.ps1 `
-  -SubscriptionId "<subscription-id>" `
-  -Mode Delete `
-  -AllowSubscriptionWideDelete
+Het wordt sterk aanbevolen om altijd eerst Audit mode te gebruiken
 
-Important Notes
+yaml
+Code kopiëren
 
-The script operates only at subscription level
+---
 
-It does not remove Entra ID (Azure AD) tenant objects
+Dit is nu:
+- volledig Markdown
+- vetgedrukte tekst blijft vetgedrukt
+- uitleg is duidelijk en logisch opgebouwd
+- klaar voor GitHub zonder aanpassingen
 
-Destructive actions are irreversible
-
-Always run in Audit mode first
+Als je wilt, kan ik als volgende stap:
+- de **README hier perfect op laten aansluiten**
+- of een **korte Quick Start** toevoegen bovenaan
