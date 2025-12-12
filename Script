@@ -1,0 +1,289 @@
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$SubscriptionId,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ResourceGroupName,
+
+    [Parameter(Mandatory = $false)]
+    [string]$TagName,
+
+    [Parameter(Mandatory = $false)]
+    [string]$TagValue,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("Audit", "Delete")]
+    [string]$Mode = "Audit",
+
+    [Parameter(Mandatory = $false)]
+    [int]$MaxDeletePasses = 5,
+
+    [Parameter(Mandatory = $false)]
+    [int]$SecondsBetweenPasses = 15,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AllowSubscriptionWideDelete,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$PurgeSoftDeleted,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$IncludeResourceGroupsInDelete
+)
+
+$ErrorActionPreference = "Stop"
+
+function Write-Log {
+    param(
+        [string]$Message,
+        [ValidateSet("INFO","WARN","ERROR")]
+        [string]$Level = "INFO"
+    )
+    $ts = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    $line = "$ts [$Level] $Message"
+    Write-Host $line
+    Add-Content -Path $global:LogPath -Value $line
+}
+
+function Assert-Guards {
+    if ($Mode -ne "Delete") { return }
+
+    $hasRg = -not [string]::IsNullOrWhiteSpace($ResourceGroupName)
+    $hasTag = -not [string]::IsNullOrWhiteSpace($TagName)
+
+    if (-not $hasRg -and -not $hasTag -and -not $AllowSubscriptionWideDelete) {
+        throw "Safety guard: in Delete mode you must set ResourceGroupName or TagName, or explicitly add -AllowSubscriptionWideDelete."
+    }
+
+    if ($IncludeResourceGroupsInDelete -and $hasRg) {
+        Write-Log "IncludeResourceGroupsInDelete is enabled. The resource group itself may be removed at the end." "WARN"
+    }
+}
+
+function Select-Subscription {
+    param([string]$Id)
+    Write-Log "Selecting subscription $Id"
+    Select-AzSubscription -SubscriptionId $Id | Out-Null
+}
+
+function Get-ScopedArmResources {
+    param(
+        [string]$Rg,
+        [string]$TName,
+        [string]$TValue
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Rg)) {
+        $resources = Get-AzResource
+    } else {
+        $resources = Get-AzResource -ResourceGroupName $Rg
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($TName)) {
+        if ([string]::IsNullOrWhiteSpace($TValue)) {
+            $resources = $resources | Where-Object { $_.Tags -and $_.Tags.ContainsKey($TName) }
+        } else {
+            $resources = $resources | Where-Object { $_.Tags -and $_.Tags.ContainsKey($TName) -and $_.Tags[$TName] -eq $TValue }
+        }
+    }
+
+    return $resources
+}
+
+function Export-Inventory {
+    param([array]$Resources)
+
+    $Resources |
+        Select-Object Name, ResourceGroupName, ResourceType, Location, ResourceId |
+        Export-Csv -NoTypeInformation -Path $global:InventoryCsvPath
+
+    $Resources |
+        Select-Object Name, ResourceGroupName, ResourceType, Location, ResourceId, Tags |
+        ConvertTo-Json -Depth 10 |
+        Out-File -FilePath $global:InventoryJsonPath -Encoding utf8
+
+    Write-Log "Inventory exported to $global:InventoryCsvPath"
+    Write-Log "Inventory exported to $global:InventoryJsonPath"
+}
+
+function Remove-ArmResources {
+    param([array]$Resources)
+
+    $removed = 0
+    $failed = New-Object System.Collections.Generic.List[object]
+
+    foreach ($r in $Resources) {
+        try {
+            Write-Log "Removing ARM resource: $($r.ResourceId)"
+            Remove-AzResource -ResourceId $r.ResourceId -Force -Confirm:$false | Out-Null
+            $removed++
+        } catch {
+            $failed.Add([pscustomobject]@{
+                Name       = $r.Name
+                Type       = $r.ResourceType
+                ResourceId = $r.ResourceId
+                Error      = $_.Exception.Message
+            }) | Out-Null
+        }
+    }
+
+    return [pscustomobject]@{
+        RemovedCount = $removed
+        Failed       = $failed
+    }
+}
+
+function Export-Failures {
+    param(
+        [array]$Failures,
+        [int]$Pass
+    )
+
+    if ($Failures.Count -le 0) { return }
+
+    $path = Join-Path $HOME ("delete_failures_pass_" + $Pass + "_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".csv")
+    $Failures | Export-Csv -NoTypeInformation -Path $path
+    Write-Log "Failures exported to $path" "WARN"
+}
+
+function Try-PurgeSoftDeletedKeyVaults {
+    if (-not $PurgeSoftDeleted) { return }
+
+    try {
+        $deleted = Get-AzKeyVault -InRemovedState -ErrorAction Stop
+    } catch {
+        Write-Log "Key Vault removed state listing failed or not available: $($_.Exception.Message)" "WARN"
+        return
+    }
+
+    if (-not $deleted) { return }
+
+    foreach ($kv in $deleted) {
+        try {
+            Write-Log "Purging soft deleted Key Vault: $($kv.VaultName)"
+            Remove-AzKeyVault -VaultName $kv.VaultName -Location $kv.Location -InRemovedState -Force -Confirm:$false | Out-Null
+        } catch {
+            Write-Log "Key Vault purge failed for $($kv.VaultName): $($_.Exception.Message)" "WARN"
+        }
+    }
+}
+
+function Try-PurgeDeletedStorageAccounts {
+    if (-not $PurgeSoftDeleted) { return }
+
+    try {
+        $deleted = Get-AzDeletedStorageAccount -ErrorAction Stop
+    } catch {
+        Write-Log "Deleted storage accounts listing failed or not available: $($_.Exception.Message)" "WARN"
+        return
+    }
+
+    if (-not $deleted) { return }
+
+    foreach ($sa in $deleted) {
+        try {
+            Write-Log "Purging deleted Storage Account: $($sa.StorageAccountName)"
+            Remove-AzDeletedStorageAccount -Name $sa.StorageAccountName -Location $sa.Location -Force -Confirm:$false | Out-Null
+        } catch {
+            Write-Log "Storage account purge failed for $($sa.StorageAccountName): $($_.Exception.Message)" "WARN"
+        }
+    }
+}
+
+function Try-RemoveResourceGroup {
+    if (-not $IncludeResourceGroupsInDelete) { return }
+    if ([string]::IsNullOrWhiteSpace($ResourceGroupName)) { return }
+
+    try {
+        Write-Log "Removing Resource Group: $ResourceGroupName"
+        Remove-AzResourceGroup -Name $ResourceGroupName -Force -Confirm:$false | Out-Null
+    } catch {
+        Write-Log "Resource group removal failed: $($_.Exception.Message)" "WARN"
+    }
+}
+
+$runStamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$global:LogPath = Join-Path $HOME ("cleanup_" + $runStamp + ".log")
+$global:InventoryCsvPath = Join-Path $HOME ("inventory_" + $runStamp + ".csv")
+$global:InventoryJsonPath = Join-Path $HOME ("inventory_" + $runStamp + ".json")
+
+Write-Log "Starting run. Mode: $Mode"
+Write-Log "SubscriptionId: $SubscriptionId"
+Write-Log "ResourceGroupName: $ResourceGroupName"
+Write-Log "TagName: $TagName"
+Write-Log "TagValue: $TagValue"
+Write-Log "MaxDeletePasses: $MaxDeletePasses"
+Write-Log "SecondsBetweenPasses: $SecondsBetweenPasses"
+Write-Log "AllowSubscriptionWideDelete: $AllowSubscriptionWideDelete"
+Write-Log "PurgeSoftDeleted: $PurgeSoftDeleted"
+Write-Log "IncludeResourceGroupsInDelete: $IncludeResourceGroupsInDelete"
+
+Assert-Guards
+Select-Subscription -Id $SubscriptionId
+
+Write-Log "Collecting resources in scope"
+$scopeResources = Get-ScopedArmResources -Rg $ResourceGroupName -TName $TagName -TValue $TagValue
+Write-Log "Found $($scopeResources.Count) ARM resources in scope"
+Export-Inventory -Resources $scopeResources
+
+if ($Mode -eq "Audit") {
+    Write-Log "Audit mode selected. No deletions performed."
+    Write-Log "Done."
+    return
+}
+
+if ($scopeResources.Count -eq 0) {
+    Write-Log "Nothing to delete in the selected scope."
+    if ($PurgeSoftDeleted) {
+        Try-PurgeSoftDeletedKeyVaults
+        Try-PurgeDeletedStorageAccounts
+    }
+    Write-Log "Done."
+    return
+}
+
+for ($pass = 1; $pass -le $MaxDeletePasses; $pass++) {
+    Write-Log "Delete pass $pass started"
+
+    $current = Get-ScopedArmResources -Rg $ResourceGroupName -TName $TagName -TValue $TagValue
+    Write-Log "Resources currently remaining in scope: $($current.Count)"
+
+    if ($current.Count -eq 0) {
+        Write-Log "No resources remaining in scope. Breaking."
+        break
+    }
+
+    $result = Remove-ArmResources -Resources $current
+    Write-Log "Removed in pass $pass: $($result.RemovedCount)"
+
+    if ($result.Failed.Count -gt 0) {
+        Write-Log "Failed deletions in pass $pass: $($result.Failed.Count)" "WARN"
+        Export-Failures -Failures $result.Failed -Pass $pass
+    }
+
+    if ($pass -lt $MaxDeletePasses) {
+        Write-Log "Sleeping $SecondsBetweenPasses seconds before next pass"
+        Start-Sleep -Seconds $SecondsBetweenPasses
+    }
+}
+
+Write-Log "Final verification"
+$remaining = Get-ScopedArmResources -Rg $ResourceGroupName -TName $TagName -TValue $TagValue
+if ($remaining.Count -eq 0) {
+    Write-Log "Verified. No ARM resources remain in scope."
+} else {
+    Write-Log "Still remaining ARM resources in scope: $($remaining.Count)" "WARN"
+    $remaining | Select-Object Name, ResourceGroupName, ResourceType, ResourceId | Format-Table -AutoSize
+}
+
+if ($PurgeSoftDeleted) {
+    Write-Log "Attempting purge of soft deleted resources where supported"
+    Try-PurgeSoftDeletedKeyVaults
+    Try-PurgeDeletedStorageAccounts
+}
+
+Try-RemoveResourceGroup
+
+Write-Log "Run complete. Log: $global:LogPath"
+Write-Log "Inventory: $global:InventoryCsvPath"
+Write-Log "Inventory: $global:InventoryJsonPath"
